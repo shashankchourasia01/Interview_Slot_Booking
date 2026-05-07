@@ -5,6 +5,7 @@ const SearchFilters = ({
   onFilterChange,
   onExport,
   onClearAll,
+  onRetry,
 }) => (
   <section className="rounded-2xl border border-white/30 bg-white/70 p-4 shadow-glass backdrop-blur-md dark:border-slate-700 dark:bg-slate-900/70">
     <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
@@ -25,6 +26,13 @@ const SearchFilters = ({
         <option value="booked">Booked</option>
         <option value="mine">My Bookings</option>
       </select>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="rounded-xl border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100 dark:border-slate-600 dark:text-slate-200 dark:hover:bg-slate-800"
+      >
+        Retry Sync
+      </button>
       <button
         type="button"
         onClick={onExport}

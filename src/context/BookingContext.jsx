@@ -1,63 +1,71 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { isAfter } from 'date-fns'
 import toast from 'react-hot-toast'
 import { TIME_SLOTS } from '../data/timeSlots'
 import { isPastSlot, toDateKey } from '../utils/date'
-import { storage } from '../utils/storage'
 import { BookingContext } from './bookingContextObject'
-
-const getOrCreateProfile = () => {
-  const existing = storage.get(storage.keys.profile, null)
-  if (existing?.deviceId) return existing
-
-  const profile = {
-    deviceId: crypto.randomUUID(),
-  }
-  storage.set(storage.keys.profile, profile)
-  return profile
-}
+import {
+  clearBookings,
+  createBooking,
+  deleteBookingById,
+  fetchBookingsWithRetry,
+} from '../api/bookingsApi'
+import { useRealtimeBookings } from '../hooks/useRealtimeBookings'
 
 export const BookingProvider = ({ children }) => {
-  const [bookings, setBookings] = useState(() => storage.get(storage.keys.bookings, {}))
+  const [bookings, setBookings] = useState([])
   const [selectedDate, setSelectedDate] = useState(() => new Date())
   const [searchTerm, setSearchTerm] = useState('')
   const [filter, setFilter] = useState('all')
   const [isHydrating, setIsHydrating] = useState(true)
-  const [profile] = useState(getOrCreateProfile)
+  const [isMutating, setIsMutating] = useState(false)
+  const [myBookingIds, setMyBookingIds] = useState([])
 
-  useEffect(() => {
-    const timer = setTimeout(() => setIsHydrating(false), 700)
-    return () => clearTimeout(timer)
-  }, [])
-
-  useEffect(() => {
-    storage.set(storage.keys.bookings, bookings)
-  }, [bookings])
-
-  useEffect(() => {
-    const onStorageChange = (event) => {
-      if (event.key === storage.keys.bookings) {
-        const nextBookings = event.newValue ? JSON.parse(event.newValue) : {}
-        setBookings(nextBookings)
-      }
-      if (event.key === storage.keys.theme && event.newValue) {
-        const nextTheme = JSON.parse(event.newValue)
-        document.documentElement.classList.toggle('dark', nextTheme === 'dark')
+  const refreshBookings = useCallback(async ({ notifyOnError = false } = {}) => {
+    try {
+      const rows = await fetchBookingsWithRetry(2)
+      setBookings(rows)
+    } catch {
+      if (notifyOnError) {
+        toast.error('Failed to load bookings. Please retry.')
       }
     }
-
-    window.addEventListener('storage', onStorageChange)
-    return () => window.removeEventListener('storage', onStorageChange)
   }, [])
+
+  useEffect(() => {
+    const bootstrap = async () => {
+      setIsHydrating(true)
+      await refreshBookings({ notifyOnError: true })
+      setIsHydrating(false)
+    }
+    bootstrap()
+  }, [refreshBookings])
+
+  useRealtimeBookings(refreshBookings)
 
   const selectedDateKey = toDateKey(selectedDate)
 
   const slotRecords = useMemo(
     () => {
-      const dayBookings = bookings[selectedDateKey] ?? {}
+      const bookingsByTime = bookings
+        .filter((entry) => entry.date === selectedDateKey)
+        .reduce((acc, entry) => {
+          acc[entry.time] = {
+            id: entry.id,
+            name: entry.name,
+            company: entry.company,
+            interviewTime: TIME_SLOTS.find((slot) => slot.id === entry.time)?.label ?? entry.time,
+            slotLabel: TIME_SLOTS.find((slot) => slot.id === entry.time)?.label ?? entry.time,
+            slotStartHour: TIME_SLOTS.find((slot) => slot.id === entry.time)?.startHour ?? null,
+            dateKey: entry.date,
+            createdAt: entry.created_at,
+          }
+          return acc
+        }, {})
+
       return TIME_SLOTS.map((slot) => {
-        const booking = dayBookings[slot.id]
-        const mine = booking?.bookedById === profile.deviceId
+        const booking = bookingsByTime[slot.id]
+        const mine = booking ? myBookingIds.includes(booking.id) : false
         const past = isPastSlot(selectedDate, slot.startHour)
         const searchText = `${booking?.name ?? ''} ${booking?.company ?? ''}`.toLowerCase()
         const searchMatched = !searchTerm || searchText.includes(searchTerm.toLowerCase())
@@ -78,12 +86,12 @@ export const BookingProvider = ({ children }) => {
         }
       })
     },
-    [bookings, filter, profile.deviceId, searchTerm, selectedDate, selectedDateKey],
+    [bookings, filter, myBookingIds, searchTerm, selectedDate, selectedDateKey],
   )
 
-  const bookSlot = ({ date, slot, name, company, interviewTime }) => {
+  const bookSlot = async ({ date, slot, name, company }) => {
     const dateKey = toDateKey(date)
-    const existingBooking = bookings[dateKey]?.[slot.id]
+    const existingBooking = bookings.some((entry) => entry.date === dateKey && entry.time === slot.id)
 
     if (existingBooking) {
       toast.error('This slot is already booked.')
@@ -95,62 +103,82 @@ export const BookingProvider = ({ children }) => {
       return false
     }
 
-    setBookings((prev) => ({
-      ...prev,
-      [dateKey]: {
-        ...(prev[dateKey] || {}),
-        [slot.id]: {
-          id: crypto.randomUUID(),
-          name,
-          company,
-          interviewTime,
-          slotLabel: slot.label,
-          slotStartHour: slot.startHour,
-          dateKey,
-          bookedById: profile.deviceId,
-          createdAt: new Date().toISOString(),
-        },
-      },
-    }))
-    toast.success('Interview slot booked successfully.')
-    return true
+    setIsMutating(true)
+    try {
+      const created = await createBooking({
+        date: dateKey,
+        time: slot.id,
+        name,
+        company,
+      })
+
+      setBookings((prev) => {
+        if (prev.some((entry) => entry.date === created.date && entry.time === created.time)) return prev
+        return [...prev, created]
+      })
+      setMyBookingIds((prev) => [...new Set([...prev, created.id])])
+
+      toast.success('Interview slot booked successfully.')
+      return true
+    } catch (error) {
+      if (error?.code === '23505') {
+        toast.error('This slot was just booked by someone else.')
+        await refreshBookings()
+      } else {
+        toast.error('Booking failed. Please try again.')
+      }
+      return false
+    } finally {
+      setIsMutating(false)
+    }
   }
 
-  const cancelBooking = (dateKey, slotId) => {
-    const existing = bookings[dateKey]?.[slotId]
+  const cancelBooking = async (dateKey, slotId) => {
+    const existing = bookings.find((entry) => entry.date === dateKey && entry.time === slotId)
     if (!existing) return
 
-    if (existing.bookedById !== profile.deviceId) {
-      toast.error('You can only cancel your own booking.')
-      return
+    setIsMutating(true)
+    try {
+      await deleteBookingById(existing.id)
+      setBookings((prev) => prev.filter((entry) => entry.id !== existing.id))
+      setMyBookingIds((prev) => prev.filter((id) => id !== existing.id))
+      toast.success('Booking canceled.')
+    } catch {
+      toast.error('Cancel failed. Please try again.')
+    } finally {
+      setIsMutating(false)
     }
-
-    setBookings((prev) => {
-      const next = { ...prev }
-      const dateBucket = { ...(next[dateKey] || {}) }
-      delete dateBucket[slotId]
-
-      if (Object.keys(dateBucket).length === 0) {
-        delete next[dateKey]
-      } else {
-        next[dateKey] = dateBucket
-      }
-
-      return next
-    })
-
-    toast.success('Booking canceled.')
   }
 
-  const clearAllBookings = () => {
-    setBookings({})
-    toast.success('All bookings cleared.')
+  const clearAllBookings = async () => {
+    setIsMutating(true)
+    try {
+      await clearBookings()
+      setBookings([])
+      toast.success('All bookings cleared.')
+    } catch {
+      toast.error('Could not clear bookings.')
+    } finally {
+      setIsMutating(false)
+    }
   }
 
   const allBookings = useMemo(
     () =>
-      Object.values(bookings)
-        .flatMap((day) => Object.values(day))
+      bookings
+        .map((entry) => {
+          const matchingSlot = TIME_SLOTS.find((slot) => slot.id === entry.time)
+          return {
+            id: entry.id,
+            name: entry.name,
+            company: entry.company,
+            interviewTime: matchingSlot?.label ?? entry.time,
+            slotLabel: matchingSlot?.label ?? entry.time,
+            slotStartHour: matchingSlot?.startHour ?? null,
+            dateKey: entry.date,
+            createdAt: entry.created_at,
+          }
+        })
         .sort((a, b) => new Date(a.dateKey) - new Date(b.dateKey)),
     [bookings],
   )
@@ -193,7 +221,8 @@ export const BookingProvider = ({ children }) => {
     cancelBooking,
     clearAllBookings,
     exportBookings,
-    isHydrating,
+    isHydrating: isHydrating || isMutating,
+    retryLoad: () => refreshBookings({ notifyOnError: true }),
   }
 
   return <BookingContext.Provider value={value}>{children}</BookingContext.Provider>

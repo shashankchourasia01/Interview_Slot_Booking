@@ -30,14 +30,15 @@ const AppShell = () => {
     clearAllBookings,
     exportBookings,
     isHydrating,
+    retryLoad,
   } = useBookings()
 
   const [activeSlot, setActiveSlot] = useState(null)
   const visibleRecords = useMemo(() => slotRecords.filter((record) => !record.hidden), [slotRecords])
 
-  const onConfirmBooking = (payload) => {
+  const onConfirmBooking = async (payload) => {
     if (!activeSlot) return
-    const saved = bookSlot({
+    const saved = await bookSlot({
       date: selectedDate,
       slot: activeSlot,
       name: payload.name.trim(),
@@ -45,11 +46,12 @@ const AppShell = () => {
       interviewTime: payload.interviewTime.trim(),
     })
     if (saved) setActiveSlot(null)
+    return saved
   }
 
-  const onClearAll = () => {
+  const onClearAll = async () => {
     if (!window.confirm('Clear all bookings from every date?')) return
-    clearAllBookings()
+    await clearAllBookings()
   }
 
   return (
@@ -68,6 +70,7 @@ const AppShell = () => {
           onFilterChange={setFilter}
           onExport={exportBookings}
           onClearAll={onClearAll}
+          onRetry={retryLoad}
         />
         <section className="grid gap-4 lg:grid-cols-[1.1fr,1.3fr,1fr]">
           <CalendarGrid selectedDate={selectedDate} onSelectDate={setSelectedDate} />

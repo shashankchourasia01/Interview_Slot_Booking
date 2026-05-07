@@ -6,10 +6,15 @@ const BookingModal = ({ isOpen, slot, onClose, onConfirm }) => {
 
   if (!isOpen || !slot) return null
 
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault()
-    onConfirm({ ...formData, interviewTime: formData.interviewTime || slot.label })
-    setFormData({ name: '', company: '', interviewTime: '' })
+    const saved = await onConfirm({
+      ...formData,
+      interviewTime: formData.interviewTime || slot.label,
+    })
+    if (saved) {
+      setFormData({ name: '', company: '', interviewTime: '' })
+    }
   }
 
   return (
